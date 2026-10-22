@@ -17,6 +17,9 @@
 
   <!-- jsPDF: Client-Side PDF Generation -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <!-- Resume text extraction: PDF.js and Mammoth (DOCX) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script>
 
   <style>
     /* DESIGN SYSTEM & STYLES */
@@ -2749,10 +2752,13 @@
           </div>
         </div>
 
-        <h2 class="section-title" style="margin-top: 1.8rem;">4. Paste Your Resume</h2>
+        <h2 class="section-title" style="margin-top: 1.8rem;">4. Upload Your Resume</h2>
         <div class="resume-wrapper">
-          <textarea id="resume-input" placeholder="Paste your resume here… Include: education, skills, projects, internships, achievements."></textarea>
-          <div class="resume-char-counter" id="resume-counter">0 / 80+ chars</div>
+          <input id="resume-file" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Upload resume PDF or DOCX" style="display:block;width:100%;padding:1rem;background:var(--surface2);border:1px dashed var(--border2);border-radius:var(--radius-sm);color:var(--text);margin-bottom:.65rem;">
+          <p style="font-size:.82rem;color:var(--text2);margin:.4rem 0;">Supported formats: PDF and Word (.docx). Your resume text is extracted in your browser.</p>
+          <div id="resume-file-status" class="resume-char-counter" role="status">No resume selected.</div>
+          <textarea id="resume-input" aria-hidden="true" tabindex="-1" style="display:none;"></textarea>
+          <div class="resume-char-counter" id="resume-counter">0 characters extracted</div>
         </div>
 
         <div class="begin-btn-wrapper">
@@ -5296,11 +5302,85 @@ Return this exact JSON structure:
     }
 
     // SCREEN 1: Start Interview Setup routine
+    // Resume upload helpers. Extraction runs locally in the browser.
+    async function extractResumeText(file) {
+      const maxBytes = 10 * 1024 * 1024;
+      if (file.size > maxBytes) throw new Error('Please upload a resume smaller than 10 MB.');
+      const name = file.name.toLowerCase();
+      let text = '';
+
+      if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+        if (!window.pdfjsLib) throw new Error('PDF reader failed to load. Refresh the page and try again.');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+        const pages = [];
+        for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+          const page = await pdf.getPage(pageNo);
+          const content = await page.getTextContent();
+          pages.push(content.items.map(item => item.str || '').join(' '));
+        }
+        text = pages.join('\n');
+      } else if (name.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        if (!window.mammoth) throw new Error('Word document reader failed to load. Refresh the page and try again.');
+        const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+        text = result.value || '';
+      } else {
+        throw new Error('Unsupported file type. Please choose a PDF or .docx file.');
+      }
+
+      text = text.replace(/\s+/g, ' ').trim();
+      if (text.length < 80) throw new Error('Very little text was found. This may be a scanned/image-only PDF; upload a text-based PDF or DOCX.');
+      document.getElementById('resume-file-status').textContent = `✓ ${file.name} — resume text extracted successfully`;
+      return text;
+    }
+
+    function updateResumeCounter() {
+      const count = (document.getElementById('resume-input').value || '').trim().length;
+      const counter = document.getElementById('resume-counter');
+      counter.textContent = `${count} characters extracted`;
+      counter.style.color = count >= 80 ? 'var(--green)' : 'var(--text3)';
+    }
+
+    function buildResumeSpecificQuestions(baseQuestions) {
+      const source = (resumeText || '').replace(/\s+/g, ' ').trim();
+      const keywordList = ['JavaScript','TypeScript','React','HTML','CSS','Python','Java','C++','SQL','MongoDB','AWS','Docker','Kubernetes','machine learning','data analysis','communication','leadership','internship','project','API','Git'];
+      const found = keywordList.filter(word => source.toLowerCase().includes(word.toLowerCase()));
+      const evidence = found.slice(0, 5);
+      if (baseQuestions.length > 0) {
+        baseQuestions[0].text = `Your resume describes your background and experience. Walk me through the experience most relevant to ${selectedRole}, and explain your personal contribution.`;
+      }
+      if (baseQuestions.length > 5) {
+        baseQuestions[5].text = evidence.length
+          ? `Your resume mentions ${evidence.join(', ')}. Choose one specific project or experience where you used these skills. What problem did you solve, what decisions did you make, and what was the result?`
+          : `Choose a specific project or experience from your resume. What problem did you solve, what tools or skills did you use, and what measurable result did you achieve?`;
+      }
+      return baseQuestions;
+    }
+
     async function startInterview() {
       if (isLoading) return;
 
       const resumeInput = document.getElementById('resume-input');
       resumeText = resumeInput.value.trim();
+      const resumeFile = document.getElementById('resume-file').files[0];
+      if (resumeFile && !resumeText) {
+        const beginBtn = document.getElementById('btn-begin');
+        beginBtn.disabled = true;
+        beginBtn.innerHTML = `Reading resume... <div class="btn-spinner"></div>`;
+        try {
+          resumeText = await extractResumeText(resumeFile);
+          resumeInput.value = resumeText;
+          updateResumeCounter();
+        } catch (error) {
+          showToast(error.message || 'Could not read this resume.', '❌');
+          beginBtn.disabled = false;
+          beginBtn.innerHTML = 'Begin Interview →';
+          return;
+        } finally {
+          beginBtn.disabled = false;
+          beginBtn.innerHTML = 'Begin Interview →';
+        }
+      }
 
       // Check validation
       if (!selectedRole || selectedRole.trim() === '') {
@@ -5323,7 +5403,7 @@ Return this exact JSON structure:
       // Set standard, satisfying micro-interaction delay of 800ms to simulate AI compilation
       setTimeout(async () => {
         try {
-          const generatedQuestions = getQuestionsForRole(selectedRole);
+          const generatedQuestions = buildResumeSpecificQuestions(getQuestionsForRole(selectedRole));
 
           // Initialize state arrays
           questions = generatedQuestions;
@@ -6072,7 +6152,9 @@ Return this exact JSON structure:
       // Clear setup inputs
       document.getElementById('custom-role-input').value = '';
       document.getElementById('resume-input').value = '';
-      document.getElementById('resume-counter').textContent = '0 / 80+ chars';
+      document.getElementById('resume-file').value = '';
+      document.getElementById('resume-file-status').textContent = 'No resume selected.';
+      document.getElementById('resume-counter').textContent = '0 characters extracted';
       document.getElementById('resume-counter').style.color = 'var(--text3)';
 
       // Clear role selector active status
@@ -6838,6 +6920,30 @@ Return this exact JSON structure:
       // 2. Setup Resume character count watcher
       const resumeInput = document.getElementById('resume-input');
       const resumeCounter = document.getElementById('resume-counter');
+      const resumeFileInput = document.getElementById('resume-file');
+      resumeFileInput.addEventListener('change', async () => {
+        const file = resumeFileInput.files && resumeFileInput.files[0];
+        resumeInput.value = '';
+        resumeText = '';
+        if (!file) {
+          document.getElementById('resume-file-status').textContent = 'No resume selected.';
+          updateResumeCounter();
+          return;
+        }
+        document.getElementById('resume-file-status').textContent = `Reading ${file.name}...`;
+        try {
+          resumeText = await extractResumeText(file);
+          resumeInput.value = resumeText;
+          updateResumeCounter();
+        } catch (error) {
+          resumeFileInput.value = '';
+          resumeText = '';
+          resumeInput.value = '';
+          document.getElementById('resume-file-status').textContent = error.message || 'Unable to read file.';
+          updateResumeCounter();
+          showToast(error.message || 'Could not read resume.', '⚠️');
+        }
+      });
 
       resumeInput.addEventListener('input', () => {
         const count = resumeInput.value.length;
